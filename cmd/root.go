@@ -15,7 +15,9 @@ var cfgFile string
 var rootCmd = &cobra.Command{
 	Use:   "gotaglog",
 	Short: "Generate a changelog from git tags",
-	// Run: func(cmd *cobra.Command, args []string) { },
+	Run: func(cmd *cobra.Command, args []string) {
+		getChangeLog()
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -38,10 +40,16 @@ func init() {
 		panic(err)
 	}
 
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	rootCmd.Flags().Bool("unreleased", false, "show only unreleased changes")
+	rootCmd.Flags().StringP("output", "o", "", "output file")
+	err = rootCmd.MarkFlagFilename("output", "md")
+	if err != nil {
+		panic(err)
+	}
 	err = viper.BindPFlags(rootCmd.Flags())
+	if err != nil {
+		panic(err)
+	}
 	err = viper.BindPFlags(rootCmd.PersistentFlags())
 	if err != nil {
 		panic(err)

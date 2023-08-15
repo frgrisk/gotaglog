@@ -15,34 +15,11 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	log "github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/term"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
-
-// generateCmd represents the generate command
-var generateCmd = &cobra.Command{
-	Use:   "generate",
-	Short: "Generate a changelog from git tags",
-	Run: func(cmd *cobra.Command, args []string) {
-		getChangeLog()
-	},
-}
-
-func init() {
-	rootCmd.AddCommand(generateCmd)
-	generateCmd.Flags().StringP("output", "o", "", "output file")
-	err := generateCmd.MarkFlagFilename("output", "md")
-	if err != nil {
-		panic(err)
-	}
-	err = viper.BindPFlags(generateCmd.Flags())
-	if err != nil {
-		panic(err)
-	}
-}
 
 type CommitGroup struct {
 	Message string
@@ -113,8 +90,13 @@ func getChangeLog() {
 		prevTag = tag
 		if ver == semverTags[len(semverTags)-1] {
 			entry = getTagEntryDetails(repo, tag, nil)
+			unreleasedEntry := []string{"## [unreleased]", entry}
 			if entry != "" {
-				changelog = append([]string{"## [unreleased]", entry}, changelog...)
+				if viper.GetBool("unreleased") {
+					changelog = unreleasedEntry
+				} else {
+					changelog = append(unreleasedEntry, changelog...)
+				}
 			}
 		}
 	}
