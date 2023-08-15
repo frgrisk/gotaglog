@@ -5,11 +5,14 @@ import (
 	"os"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var cfgFile string
+
+const defaultUnreleasedTag = "unreleased"
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -28,6 +31,7 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableLevelTruncation: true})
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -41,6 +45,7 @@ func init() {
 	}
 
 	rootCmd.Flags().Bool("unreleased", false, "show only unreleased changes")
+	rootCmd.Flags().StringP("tag", "t", defaultUnreleasedTag, "tag for unreleased changes")
 	rootCmd.Flags().StringP("output", "o", "", "output file")
 	err = rootCmd.MarkFlagFilename("output", "md")
 	if err != nil {

@@ -34,6 +34,8 @@ The application accepts several flags:
 - `--config`: path to configuration file (default is `$HOME/.gotaglog.yaml`).
 - `-o, --output`: path to output file (default if to print to stdout).
 - `-r, --repo`: repo to generate changelog for (default is current directory).
+- `-t, --tag`: semantic version tag for unreleased changes (default is 
+  "unreleased").
 - `--unreleased`: show only unreleased changes.
 
 ### Environment variables

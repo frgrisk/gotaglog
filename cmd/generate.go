@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver"
 	"github.com/charmbracelet/glamour"
@@ -90,7 +91,24 @@ func getChangeLog() {
 		prevTag = tag
 		if ver == semverTags[len(semverTags)-1] {
 			entry = getTagEntryDetails(repo, tag, nil)
-			unreleasedEntry := []string{"## [unreleased]", entry}
+			unreleasedTag := viper.GetString("tag")
+			unreleasedHeader := fmt.Sprintf("## [%s]", unreleasedTag)
+			if unreleasedTag != defaultUnreleasedTag {
+				unreleasedVer, err := semver.NewVersion(unreleasedTag)
+				if err != nil {
+					log.Fatalln("Cannot parse unreleased tag into a semantic version tag:", err)
+				}
+				for _, v := range semverTags {
+					if unreleasedVer.LessThan(v) {
+						log.Warnf("Unreleased tag %q is lower than existing tag %q in the repository.", unreleasedVer, v)
+					}
+					if unreleasedVer.Equal(v) {
+						log.Warnf("Unreleased tag %q already exists in the repository.", unreleasedVer)
+					}
+				}
+				unreleasedHeader = fmt.Sprintf("## [%s] - %s", unreleasedVer, time.Now().Format("2006-01-02"))
+			}
+			unreleasedEntry := []string{unreleasedHeader, entry}
 			if entry != "" {
 				if viper.GetBool("unreleased") {
 					changelog = unreleasedEntry
