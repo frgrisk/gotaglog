@@ -1,3 +1,8 @@
+## [0.2.0] - 2023-08-16
+
+### Features
+-  Add version incrementing flags
+
 ## [0.1.2] - 2023-08-16
 
 ### Features
