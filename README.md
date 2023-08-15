@@ -36,6 +36,12 @@ The application accepts several flags:
 - `-r, --repo`: repo to generate changelog for (default is current directory).
 - `-t, --tag`: semantic version tag for unreleased changes (default is 
   "unreleased").
+- `--inc-patch`: increment patch version (default is false). Takes 
+  precedence over `--tag`.
+- `--inc-minor`: increment patch version (default is false). Takes 
+  precedence over `--inc-patch` and `--tag`.
+- `--inc-major`: increment patch version (default is false). Takes 
+  precedence over `--inc-minor`, `--inc-patch`, and `--tag`.
 - `--unreleased`: show only unreleased changes.
 
 ### Environment variables

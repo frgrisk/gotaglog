@@ -45,6 +45,9 @@ func init() {
 	}
 
 	rootCmd.Flags().Bool("unreleased", false, "show only unreleased changes")
+	rootCmd.Flags().Bool("inc-major", false, "generate tag for unreleased changes by incrementing the major version")
+	rootCmd.Flags().Bool("inc-minor", false, "generate tag for unreleased changes by incrementing the minor version")
+	rootCmd.Flags().Bool("inc-patch", false, "generate tag for unreleased changes by incrementing the patch version")
 	rootCmd.Flags().StringP("tag", "t", defaultUnreleasedTag, "tag for unreleased changes")
 	rootCmd.Flags().StringP("output", "o", "", "output file")
 	err = rootCmd.MarkFlagFilename("output", "md")
