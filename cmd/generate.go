@@ -244,9 +244,10 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 		return nil
 	})
 
-	for groupName, commits := range groupedCommits {
+	for _, groupName := range commitGroups {
+		commits := groupedCommits[groupName.Group]
 		if len(commits) > 0 {
-			entry += fmt.Sprintf("\n### %s\n\n", groupName)
+			entry += fmt.Sprintf("\n### %s\n\n", groupName.Group)
 			for _, commit := range commits {
 				entry += fmt.Sprintln("- " + commit)
 			}
