@@ -125,6 +125,7 @@ func getChangeLog() {
 			}
 		}
 	}
+	changelog = append([]string{"# Changelog\n"}, changelog...)
 	if viper.GetString("output") != "" {
 		err = os.WriteFile(viper.GetString("output"), []byte(strings.Join(changelog, "\n")), 0644)
 		if err != nil {
