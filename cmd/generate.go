@@ -105,7 +105,7 @@ func getChangeLog() {
 			} else if unreleasedTag != defaultUnreleasedTag {
 				unreleasedVer, err := semver.NewVersion(unreleasedTag)
 				if err != nil {
-					log.Fatalln("Cannot parse unreleased tag into a semantic version tag:", err)
+					log.WithField("tag", unreleasedTag).Fatal(err)
 				}
 				if unreleasedVer.LessThan(ver) {
 					log.Warnf("Unreleased tag %q is lower than existing tag %q in the repository.", unreleasedVer, ver)
