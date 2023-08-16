@@ -225,7 +225,8 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 				var scope string
 				if len(matches) > 1 && matches[1] != "" {
 					// Remove the parentheses from the captured scope
-					scope = strings.ToLower(matches[1])
+					rawScope := strings.TrimSuffix(strings.TrimPrefix(matches[1], "("), ")")
+					scope = fmt.Sprintf("(**%s**)", strings.ToLower(rawScope))
 				}
 
 				// Remove prefix from the title
