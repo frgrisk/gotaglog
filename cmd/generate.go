@@ -235,7 +235,7 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 				cleanTitle := re.ReplaceAllString(title, "")
 				words := strings.Fields(cleanTitle)
 				words[0] = cases.Title(language.Und, cases.NoLower).String(words[0])
-				groupedCommits[group.Group] = append(groupedCommits[group.Group], strings.Join(append([]string{scope}, words...), " "))
+				groupedCommits[group.Group] = append(groupedCommits[group.Group], strings.TrimSpace(strings.Join(append([]string{scope}, words...), " ")))
 				break
 			}
 		}
@@ -245,7 +245,7 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 
 	for groupName, commits := range groupedCommits {
 		if len(commits) > 0 {
-			entry += fmt.Sprintln("\n###", groupName)
+			entry += fmt.Sprintf("\n###%s\n\n", groupName)
 			for _, commit := range commits {
 				entry += fmt.Sprintln("- " + commit)
 			}
