@@ -179,19 +179,21 @@ func getChangeLog() {
 }
 
 func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference) string {
-	var from, until plumbing.Hash
+	var from, until *object.Commit
+	options := &git.LogOptions{}
 
 	if olderTag != nil {
-		from = olderTag.Hash()
+		from = getTagCommit(repo, olderTag)
 	}
 
 	if newerTag != nil {
-		until = newerTag.Hash()
+		until = getTagCommit(repo, newerTag)
+		options = &git.LogOptions{From: until.Hash}
 	}
 
 	var entry string
 
-	commitIter, err := repo.Log(&git.LogOptions{From: until})
+	commitIter, err := repo.Log(options)
 	if err != nil {
 		log.Fatalln("Cannot fetch commits:", err)
 	}
@@ -206,7 +208,7 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 				log.Fatalf("Cannot check ancestor of commit %s: %v", getTagCommit(repo, olderTag).Hash, err)
 			}
 		}
-		if (from != plumbing.ZeroHash && c.Hash == from) || ancestor {
+		if (from != nil && c.Hash == from.Hash) || ancestor {
 			return storer.ErrStop
 		}
 
