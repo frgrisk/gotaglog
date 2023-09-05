@@ -34,6 +34,7 @@ var commitGroups = []CommitGroup{
 	{Message: "^doc", Group: "Documentation"},
 	{Message: "^perf", Group: "Performance"},
 	{Message: "^refactor", Group: "Refactor"},
+	{Message: "^revert", Group: "Revert"},
 	{Message: "^style", Group: "Styling"},
 	{Message: "^test", Group: "Testing"},
 	{Message: "^chore\\(release\\)", Skip: true},
