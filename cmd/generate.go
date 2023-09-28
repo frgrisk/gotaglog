@@ -172,6 +172,9 @@ func getChangeLog() {
 		glamour.WithWordWrap(int(width)),
 		glamour.WithPreservedNewLines(),
 	)
+	if err != nil {
+		log.Fatalln("Cannot create terminal renderer:", err)
+	}
 
 	out, err := r.Render(strings.Join(changelog, "\n"))
 	if err != nil {
