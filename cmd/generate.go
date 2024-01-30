@@ -31,7 +31,7 @@ type CommitGroup struct {
 var commitGroups = []CommitGroup{
 	{Message: "^feat", Group: "✨ Features"},
 	{Message: "^fix", Group: "🐛 Fixes"},
-	{Message: "^doc", Group: "📖 Documentation"},
+	{Message: "^docs", Group: "📖 Documentation"},
 	{Message: "^perf", Group: "⚡️Performance"},
 	{Message: "^refactor", Group: "✏️ Refactor"},
 	{Message: "^revert", Group: "↩️ Revert"},
