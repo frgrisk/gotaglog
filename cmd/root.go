@@ -18,7 +18,7 @@ const defaultUnreleasedTag = "unreleased"
 var rootCmd = &cobra.Command{
 	Use:   "gotaglog",
 	Short: "Generate a changelog from git tags",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		getChangeLog()
 	},
 }
