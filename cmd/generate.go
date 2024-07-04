@@ -225,7 +225,7 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 		title := strings.Split(c.Message, "\n")[0]
 
 		for _, group := range commitGroups {
-			re := regexp.MustCompile(group.Message + "(\\(.*\\))?:.")
+			re := regexp.MustCompile(group.Message + "(\\(.*\\))?!?:.")
 			matches := re.FindStringSubmatch(title)
 
 			if len(matches) > 0 {
