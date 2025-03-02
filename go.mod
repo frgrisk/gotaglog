@@ -1,7 +1,8 @@
 module github.com/frgrisk/gotaglog
 
-go 1.21.0
-toolchain go1.23.6
+go 1.23.0
+
+toolchain go1.24.0
 
 require (
 	github.com/Masterminds/semver v1.5.0
