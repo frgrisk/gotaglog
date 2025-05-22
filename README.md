@@ -5,7 +5,9 @@
 GoTagLog is a simple command-line application to automatically generate a
 changelog from git tags based on the semantic versioning. It categorizes
 commits into groups and outputs them in a formatted markdown file or
-directly to the terminal with highlighting.
+directly to the terminal with highlighting. Commit messages following the
+Conventional Commits `!` breaking change convention are highlighted under a
+dedicated **Breaking Changes** section.
 
 ## Prerequisites
 
