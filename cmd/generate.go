@@ -215,6 +215,7 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 	var entry string
 
 	groupedCommits := make(map[string][]string)
+	var breakingChanges []string
 
 	_ = commitIter.ForEach(func(c *object.Commit) error {
 		// mark commit as seen to avoid traversing it again for older tags
@@ -222,6 +223,9 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 
 		// Only print the first line of the commit message (the title)
 		title := strings.Split(c.Message, "\n")[0]
+		isBreaking := strings.Contains(title, "!:") ||
+			strings.Contains(strings.ToLower(c.Message), "breaking change:") ||
+			strings.Contains(strings.ToLower(c.Message), "breaking-change:")
 
 		for _, group := range commitGroups {
 			re := regexp.MustCompile(group.Message + "(\\(.*\\))?!?:.")
@@ -243,13 +247,25 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 				cleanTitle := re.ReplaceAllString(title, "")
 				words := strings.Fields(cleanTitle)
 				words[0] = cases.Title(language.Und, cases.NoLower).String(words[0])
-				groupedCommits[group.Group] = append(groupedCommits[group.Group], strings.TrimSpace(strings.Join(append([]string{scope}, words...), " ")))
+				commitMsg := strings.TrimSpace(strings.Join(append([]string{scope}, words...), " "))
+				if isBreaking {
+					breakingChanges = append(breakingChanges, commitMsg)
+				} else {
+					groupedCommits[group.Group] = append(groupedCommits[group.Group], commitMsg)
+				}
 				break
 			}
 		}
 
 		return nil
 	})
+
+	if len(breakingChanges) > 0 {
+		entry += "\n### \U0001F4A5 Breaking Changes\n\n"
+		for _, commit := range breakingChanges {
+			entry += fmt.Sprintln("- " + commit)
+		}
+	}
 
 	for _, groupName := range commitGroups {
 		commits := groupedCommits[groupName.Group]
