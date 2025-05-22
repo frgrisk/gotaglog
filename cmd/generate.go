@@ -14,7 +14,6 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/storer"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"golang.org/x/term"
@@ -86,16 +85,19 @@ func getChangeLog() {
 
 	var prevTag *plumbing.Reference
 
+	// keep track of already processed commits to avoid re-traversing them
+	seen := make(map[plumbing.Hash]bool)
+
 	var changelog []string
 
 	for _, ver := range semverTags {
 		tag := tagMap[ver.String()]
 		entry := fmt.Sprintf("## [%s] - %s\n", ver.String(), getTagCommit(repo, tag).Author.When.Format("2006-01-02"))
-		entry += getTagEntryDetails(repo, prevTag, tag)
+		entry += getTagEntryDetails(repo, prevTag, tag, seen)
 		changelog = append([]string{entry}, changelog...)
 		prevTag = tag
 		if ver == semverTags[len(semverTags)-1] {
-			entry = getTagEntryDetails(repo, tag, nil)
+			entry = getTagEntryDetails(repo, tag, nil, seen)
 			unreleasedTag := viper.GetString("tag")
 			unreleasedHeader := fmt.Sprintf("## [%s]", unreleasedTag)
 			if viper.GetBool("inc-major") {
@@ -187,40 +189,37 @@ func getChangeLog() {
 	fmt.Print(out)
 }
 
-func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference) string {
-	var from, until *object.Commit
-	options := &git.LogOptions{}
-
-	if olderTag != nil {
-		from = getTagCommit(repo, olderTag)
-	}
+func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference, seen map[plumbing.Hash]bool) string {
+	var until *object.Commit
 
 	if newerTag != nil {
 		until = getTagCommit(repo, newerTag)
-		options = &git.LogOptions{From: until.Hash}
+	} else {
+		head, err := repo.Head()
+		if err != nil {
+			log.Fatalln("Cannot resolve HEAD:", err)
+		}
+		until, err = repo.CommitObject(head.Hash())
+		if err != nil {
+			log.Fatalln("Cannot fetch HEAD commit:", err)
+		}
 	}
+
+	var ignore []plumbing.Hash
+	if olderTag != nil {
+		ignore = []plumbing.Hash{getTagCommit(repo, olderTag).Hash}
+	}
+
+	commitIter := object.NewCommitIterBSF(until, seen, ignore)
 
 	var entry string
-
-	commitIter, err := repo.Log(options)
-	if err != nil {
-		log.Fatalln("Cannot fetch commits:", err)
-	}
 
 	groupedCommits := make(map[string][]string)
 	var breakingChanges []string
 
 	_ = commitIter.ForEach(func(c *object.Commit) error {
-		ancestor := false
-		if olderTag != nil {
-			ancestor, err = c.IsAncestor(getTagCommit(repo, olderTag))
-			if err != nil {
-				log.Fatalf("Cannot check ancestor of commit %s: %v", getTagCommit(repo, olderTag).Hash, err)
-			}
-		}
-		if (from != nil && c.Hash == from.Hash) || ancestor {
-			return storer.ErrStop
-		}
+		// mark commit as seen to avoid traversing it again for older tags
+		seen[c.Hash] = true
 
 		// Only print the first line of the commit message (the title)
 		title := strings.Split(c.Message, "\n")[0]
