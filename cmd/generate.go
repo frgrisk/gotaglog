@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"golang.org/x/term"
@@ -90,15 +91,96 @@ func getChangeLog() {
 
 	var changelog []string
 
+	// Find the most recent tag that is an ancestor of HEAD
+	head, err := repo.Head()
+	if err != nil {
+		log.Fatalln("Cannot resolve HEAD:", err)
+	}
+	headCommit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		log.Fatalln("Cannot fetch HEAD commit:", err)
+	}
+	
+	// Filter tags to only include those that are ancestors of HEAD
+	// This ensures we don't include tags from other branches when generating
+	// a changelog from a specific branch (e.g., v0.10 branch shouldn't include
+	// tags from v25.x branch)
+	var ancestorTags semver.Collection
+	ancestorTagMap := make(map[string]*plumbing.Reference)
+	
 	for _, ver := range semverTags {
 		tag := tagMap[ver.String()]
-		entry := fmt.Sprintf("## [%s] - %s\n", ver.String(), getTagCommit(repo, tag).Author.When.Format("2006-01-02"))
-		entry += getTagEntryDetails(repo, prevTag, tag, seen)
-		changelog = append([]string{entry}, changelog...)
-		prevTag = tag
-		if ver == semverTags[len(semverTags)-1] {
-			entry = getTagEntryDetails(repo, tag, nil, seen)
+		tagCommit := getTagCommit(repo, tag)
+		
+		// Check if this tag is an ancestor of HEAD
+		isAncestor, err := isAncestorCommit(repo, tagCommit, headCommit)
+		if err != nil {
+			log.Warnf("Error checking ancestry for tag %s: %v", ver.String(), err)
+			continue
+		}
+		if isAncestor {
+			ancestorTags = append(ancestorTags, ver)
+			ancestorTagMap[ver.String()] = tag
+		}
+	}
+	
+	// Re-sort the filtered tags
+	sort.Sort(ancestorTags)
+	
+	var lastAncestorTag *plumbing.Reference
+	var lastAncestorVer *semver.Version
+	if len(ancestorTags) > 0 {
+		lastAncestorVer = ancestorTags[len(ancestorTags)-1]
+		lastAncestorTag = ancestorTagMap[lastAncestorVer.String()]
+	}
+
+	// If --unreleased flag is set, only generate unreleased changes
+	if viper.GetBool("unreleased") && lastAncestorTag != nil {
+		unreleasedSeen := make(map[plumbing.Hash]bool)
+		entry := getTagEntryDetails(repo, lastAncestorTag, nil, unreleasedSeen)
+		if entry != "" {
 			unreleasedTag := viper.GetString("tag")
+			unreleasedHeader := fmt.Sprintf("## [%s]", unreleasedTag)
+			if viper.GetBool("inc-major") {
+				unreleasedVer := lastAncestorVer.IncMajor()
+				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
+			} else if viper.GetBool("inc-minor") {
+				unreleasedVer := lastAncestorVer.IncMinor()
+				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
+			} else if viper.GetBool("inc-patch") {
+				unreleasedVer := lastAncestorVer.IncPatch()
+				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
+			} else if unreleasedTag != defaultUnreleasedTag {
+				unreleasedVer, err := semver.NewVersion(unreleasedTag)
+				if err != nil {
+					log.WithField("tag", unreleasedTag).Fatal(err)
+				}
+				if unreleasedVer.LessThan(lastAncestorVer) {
+					log.Warnf("Unreleased tag %q is lower than existing tag %q in the repository.", unreleasedVer, lastAncestorVer)
+				}
+				if unreleasedVer.Equal(lastAncestorVer) {
+					log.Warnf("Unreleased tag %q already exists in the repository.", unreleasedVer)
+				}
+				unreleasedHeader = fmt.Sprintf("## [%s] - %s", unreleasedVer, time.Now().Format("2006-01-02"))
+			}
+			changelog = []string{"# Changelog\n", unreleasedHeader, entry}
+		} else {
+			changelog = []string{"# Changelog\n"}
+		}
+	} else {
+		// Regular changelog generation
+		for _, ver := range ancestorTags {
+			tag := ancestorTagMap[ver.String()]
+			entry := fmt.Sprintf("## [%s] - %s\n", ver.String(), getTagCommit(repo, tag).Author.When.Format("2006-01-02"))
+			entry += getTagEntryDetails(repo, prevTag, tag, seen)
+			changelog = append([]string{entry}, changelog...)
+			prevTag = tag
+			if lastAncestorTag != nil && ver == lastAncestorVer {
+				// For unreleased changes, use a fresh seen map to avoid excluding
+				// commits that were processed in other branches/tags
+				unreleasedSeen := make(map[plumbing.Hash]bool)
+				entry = getTagEntryDetails(repo, tag, nil, unreleasedSeen)
+				unreleasedTag := viper.GetString("tag")
 			unreleasedHeader := fmt.Sprintf("## [%s]", unreleasedTag)
 			if viper.GetBool("inc-major") {
 				unreleasedVer := ver.IncMajor()
@@ -124,15 +206,12 @@ func getChangeLog() {
 			}
 			unreleasedEntry := []string{unreleasedHeader, entry}
 			if entry != "" {
-				if viper.GetBool("unreleased") {
-					changelog = unreleasedEntry
-				} else {
-					changelog = append(unreleasedEntry, changelog...)
-				}
+				changelog = append(unreleasedEntry, changelog...)
 			}
 		}
 	}
-	changelog = append([]string{"# Changelog\n"}, changelog...)
+		changelog = append([]string{"# Changelog\n"}, changelog...)
+	}
 	if viper.GetString("output") != "" {
 		err = os.WriteFile(viper.GetString("output"), []byte(strings.Join(changelog, "\n")), 0644)
 		if err != nil {
@@ -205,8 +284,22 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 		}
 	}
 
+	// Build a set of commits reachable from the older tag for filtering
+	olderTagCommits := make(map[plumbing.Hash]bool)
+	if olderTag != nil && newerTag == nil {
+		// For unreleased changes, collect all commits reachable from the older tag
+		olderCommit := getTagCommit(repo, olderTag)
+		olderTagCommits[olderCommit.Hash] = true
+		ancestorIter := object.NewCommitIterBSF(olderCommit, nil, nil)
+		_ = ancestorIter.ForEach(func(c *object.Commit) error {
+			olderTagCommits[c.Hash] = true
+			return nil
+		})
+	}
+
 	var ignore []plumbing.Hash
-	if olderTag != nil {
+	if olderTag != nil && newerTag != nil {
+		// For regular tag ranges, just ignore the older tag itself
 		ignore = []plumbing.Hash{getTagCommit(repo, olderTag).Hash}
 	}
 
@@ -218,6 +311,11 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 	var breakingChanges []string
 
 	_ = commitIter.ForEach(func(c *object.Commit) error {
+		// Skip commits that are reachable from the older tag (for unreleased changes)
+		if olderTagCommits[c.Hash] {
+			return nil
+		}
+		
 		// mark commit as seen to avoid traversing it again for older tags
 		seen[c.Hash] = true
 
@@ -302,4 +400,28 @@ func getTagCommit(repo *git.Repository, tag *plumbing.Reference) *object.Commit 
 	}
 
 	return commit
+}
+
+// isAncestorCommit checks if ancestor is an ancestor of descendant
+func isAncestorCommit(_ *git.Repository, ancestor, descendant *object.Commit) (bool, error) {
+	// If they're the same commit, ancestor is technically an ancestor
+	if ancestor.Hash == descendant.Hash {
+		return true, nil
+	}
+	
+	// Walk back from descendant to see if we can reach ancestor
+	found := false
+	iter := object.NewCommitIterBSF(descendant, nil, nil)
+	err := iter.ForEach(func(c *object.Commit) error {
+		if c.Hash == ancestor.Hash {
+			found = true
+			return storer.ErrStop
+		}
+		return nil
+	})
+	if err != nil && err != storer.ErrStop {
+		return false, err
+	}
+	
+	return found, nil
 }
