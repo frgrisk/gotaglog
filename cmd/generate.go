@@ -268,57 +268,68 @@ func getChangeLog() {
 	fmt.Print(out)
 }
 
-func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference, seen map[plumbing.Hash]bool) string {
+// getCommitsInRange returns commits that are reachable from newerTag but not from olderTag
+func getCommitsInRange(repo *git.Repository, olderTag, newerTag *plumbing.Reference) ([]*object.Commit, error) {
 	var until *object.Commit
+	var err error
 
 	if newerTag != nil {
 		until = getTagCommit(repo, newerTag)
 	} else {
 		head, err := repo.Head()
 		if err != nil {
-			log.Fatalln("Cannot resolve HEAD:", err)
+			return nil, err
 		}
 		until, err = repo.CommitObject(head.Hash())
 		if err != nil {
-			log.Fatalln("Cannot fetch HEAD commit:", err)
+			return nil, err
 		}
 	}
 
-	// Build a set of commits reachable from the older tag for filtering
-	olderTagCommits := make(map[plumbing.Hash]bool)
-	if olderTag != nil && newerTag == nil {
-		// For unreleased changes, collect all commits reachable from the older tag
+	// Get all commits reachable from olderTag (if any)
+	olderCommits := make(map[plumbing.Hash]bool)
+	if olderTag != nil {
 		olderCommit := getTagCommit(repo, olderTag)
-		olderTagCommits[olderCommit.Hash] = true
-		ancestorIter := object.NewCommitIterBSF(olderCommit, nil, nil)
-		_ = ancestorIter.ForEach(func(c *object.Commit) error {
-			olderTagCommits[c.Hash] = true
+		olderCommits[olderCommit.Hash] = true
+		olderIter := object.NewCommitIterBSF(olderCommit, nil, nil)
+		err = olderIter.ForEach(func(c *object.Commit) error {
+			olderCommits[c.Hash] = true
 			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	var ignore []plumbing.Hash
-	if olderTag != nil && newerTag != nil {
-		// For regular tag ranges, just ignore the older tag itself
-		ignore = []plumbing.Hash{getTagCommit(repo, olderTag).Hash}
+	// Get commits reachable from until that are not in olderCommits
+	var commits []*object.Commit
+	untilIter := object.NewCommitIterBSF(until, nil, nil)
+	err = untilIter.ForEach(func(c *object.Commit) error {
+		if !olderCommits[c.Hash] {
+			commits = append(commits, c)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	commitIter := object.NewCommitIterBSF(until, seen, ignore)
+	return commits, nil
+}
+
+func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference, _ map[plumbing.Hash]bool) string {
+	// Get commits that are in this specific tag range
+	commits, err := getCommitsInRange(repo, olderTag, newerTag)
+	if err != nil {
+		log.Fatalln("Cannot get commits in range:", err)
+	}
 
 	var entry string
 
 	groupedCommits := make(map[string][]string)
 	var breakingChanges []string
 
-	_ = commitIter.ForEach(func(c *object.Commit) error {
-		// Skip commits that are reachable from the older tag (for unreleased changes)
-		if olderTagCommits[c.Hash] {
-			return nil
-		}
-		
-		// mark commit as seen to avoid traversing it again for older tags
-		seen[c.Hash] = true
-
+	for _, c := range commits {
 		// Only print the first line of the commit message (the title)
 		title := strings.Split(c.Message, "\n")[0]
 		isBreaking := strings.Contains(title, "!:") ||
@@ -354,9 +365,7 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 				break
 			}
 		}
-
-		return nil
-	})
+	}
 
 	if len(breakingChanges) > 0 {
 		entry += "\n### \U0001F4A5 Breaking Changes\n\n"
