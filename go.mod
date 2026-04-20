@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/charmbracelet/glamour v1.0.0
-	github.com/go-git/go-git/v5 v5.17.2
+	github.com/go-git/go-git/v5 v5.18.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
