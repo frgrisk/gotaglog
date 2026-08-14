@@ -1,9 +1,9 @@
 module github.com/frgrisk/gotaglog
 
-go 1.25.0
+go 1.26
 
 require (
-	github.com/Masterminds/semver v1.5.0
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/sirupsen/logrus v1.9.4
