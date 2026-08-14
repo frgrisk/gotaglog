@@ -32,7 +32,12 @@ golangci-lint run
 ```
 
 ### Testing
-**Note**: No test files currently exist in the project. When adding tests, follow Go testing conventions and place them alongside the code files with `_test.go` suffix.
+```bash
+go test ./...
+
+# Benchmark against a large repository (the case traversal is tuned for)
+GOTAGLOG_BENCH_REPO=/path/to/big-repo go test -run=NONE -bench=. -benchmem -count=6 ./cmd/
+```
 
 ## Architecture and Code Structure
 
@@ -40,6 +45,7 @@ golangci-lint run
 - **main.go**: Entry point that calls `cmd.Execute()`
 - **cmd/root.go**: Root command setup, Viper configuration initialization
 - **cmd/generate.go**: Main changelog generation logic
+- **cmd/repo.go**: Repository opening and commit-graph traversal
 
 ### Key Design Patterns
 1. **Command Pattern**: Uses Cobra for CLI structure
@@ -57,8 +63,11 @@ golangci-lint run
 - `revert:` → ↩️ Revert
 - `style:` → Styling
 - `test:` → 🧪 Testing
-- `build:`/`deps:` → ⚙️ Dependencies
+- `build(deps):` → ⚙️ Dependencies
+- `build(deps-dev):` → ⚙️ Dev Dependencies
+- `build:` → 🛠️ Build System
 - `ci:` → 🔄 Continuous Integration
+- `chore:` → Miscellaneous Tasks, except `chore(release):` and `chore(ignore):`, which are dropped
 - Breaking changes → 💥 Breaking Changes (separate section)
 
 ### Key Dependencies
@@ -69,6 +78,14 @@ golangci-lint run
 - **github.com/charmbracelet/glamour**: Terminal markdown rendering
 - **github.com/sirupsen/logrus**: Structured logging
 
+## Changelog Semantics
+
+A `## [version]` section is `ancestors(tag) - ancestors(previous tag in **semver** order)` — not chronological order, not the branch parent.
+
+A commit appearing in several sections is **correct, not a bug**. A fix released in v1.2.3 on a maintenance line and merged forward is new relative to both v1.2.2 and v2.0.0, so it belongs under v1.2.3 and v2.1.0; collapsing to one section per commit destroys the v2.0.0 → v2.1.0 upgrade path. Check before "fixing": `comm -12 <(git rev-list v2.1.0 ^v2.0.0 | sort) <(git rev-list v1.2.3 | sort)`.
+
+Corollary: inconsistent tag naming makes sections misleading — `v2.0.0-beta9` sorts *above* `v2.0.0-beta.13`, so its predecessor is chronologically later.
+
 ## Important Implementation Details
 
 1. **Version Tag Sorting**: Tags are sorted using semantic versioning rules, not alphabetically
@@ -76,6 +93,7 @@ golangci-lint run
 3. **Error Handling**: Uses `log.Fatalln` for critical errors - consider graceful error handling for library usage
 4. **Configuration**: Environment variables must be prefixed with `GOTAGLOG_`
 5. **Output**: Detects terminal capabilities for colored/formatted output vs plain markdown
+6. **Repository access**: use `openRepository` (cmd/repo.go), never `git.PlainOpen` directly — the default storage reopens the packfile on every object read
 
 ## Release Process
 
@@ -87,9 +105,7 @@ golangci-lint run
 ## Common Development Tasks
 
 ### Adding a New Commit Category
-1. Add the category to the `commitCategories` map in cmd/generate.go
-2. Add corresponding emoji/label in the same map
-3. Update the switch statement in `categorizeCommit()` function
+Add a `matchGroup(pattern, label)` or `skipGroup(pattern)` entry to the `commitGroups` slice in cmd/generate.go. First match wins, so `^build\(deps\)` must stay above `^build`.
 
 ### Modifying Output Format
 - Terminal output uses glamour renderer configured in cmd/generate.go
