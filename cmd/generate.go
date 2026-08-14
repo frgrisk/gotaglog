@@ -1,20 +1,20 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/Masterminds/semver"
+	"github.com/Masterminds/semver/v3"
 	"github.com/charmbracelet/glamour"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/storer"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"golang.org/x/term"
@@ -26,24 +26,81 @@ type CommitGroup struct {
 	Message string
 	Group   string
 	Skip    bool
+
+	// re is always non-nil: matchGroup and skipGroup are the only ways to build a
+	// CommitGroup, and a zero-value one would panic when categorizing a commit.
+	re *regexp.Regexp
+}
+
+// matchGroup builds a group whose commits are listed under name.
+func matchGroup(message, name string) CommitGroup {
+	return CommitGroup{Message: message, Group: name, re: mustPrefixRE(message)}
+}
+
+// skipGroup builds a group whose commits are left out of the changelog.
+func skipGroup(message string) CommitGroup {
+	return CommitGroup{Message: message, Skip: true, re: mustPrefixRE(message)}
+}
+
+// mustPrefixRE compiles message into a conventional-commit prefix matcher:
+// an optional (scope), an optional breaking "!", the colon, and any spacing
+// before the description. The spacing must stay \s* rather than a wildcard, or
+// "fix:no space" loses its first character to the match.
+func mustPrefixRE(message string) *regexp.Regexp {
+	return regexp.MustCompile(message + `(\(.*\))?!?:\s*`)
 }
 
 var commitGroups = []CommitGroup{
-	{Message: "^feat", Group: "✨ Features"},
-	{Message: "^fix", Group: "🐛 Fixes"},
-	{Message: "^docs", Group: "📖 Documentation"},
-	{Message: "^perf", Group: "⚡️Performance"},
-	{Message: "^refactor", Group: "✏️ Refactor"},
-	{Message: "^revert", Group: "↩️ Revert"},
-	{Message: "^style", Group: "Styling"},
-	{Message: "^test", Group: "🧪 Testing"},
-	{Message: "^build\\(deps\\)", Group: "⚙️ Dependencies"},
-	{Message: "^build\\(deps-dev\\)", Group: "⚙️ Dev Dependencies"},
-	{Message: "^build", Group: "🛠️ Build System"},
-	{Message: "^ci", Group: "🔄 Continuous Integration"},
-	{Message: "^chore\\(release\\)", Skip: true},
-	{Message: "^chore\\(ignore\\)", Skip: true},
-	{Message: "^chore", Group: "Miscellaneous Tasks"},
+	matchGroup("^feat", "✨ Features"),
+	matchGroup("^fix", "🐛 Fixes"),
+	matchGroup("^docs", "📖 Documentation"),
+	matchGroup("^perf", "⚡️Performance"),
+	matchGroup("^refactor", "✏️ Refactor"),
+	matchGroup("^revert", "↩️ Revert"),
+	matchGroup("^style", "Styling"),
+	matchGroup("^test", "🧪 Testing"),
+	matchGroup("^build\\(deps\\)", "⚙️ Dependencies"),
+	matchGroup("^build\\(deps-dev\\)", "⚙️ Dev Dependencies"),
+	matchGroup("^build", "🛠️ Build System"),
+	matchGroup("^ci", "🔄 Continuous Integration"),
+	skipGroup("^chore\\(release\\)"),
+	skipGroup("^chore\\(ignore\\)"),
+	matchGroup("^chore", "Miscellaneous Tasks"),
+}
+
+// titleCaser upper-cases the first word of a commit description. Building one
+// per commit costs an allocation for no benefit; it is stateless and reusable.
+var titleCaser = cases.Title(language.Und, cases.NoLower)
+
+// unreleasedHeader renders the changelog heading for not-yet-released commits.
+// base is the newest released version, which the --inc-* flags increment from
+// and which a caller-supplied --tag is sanity-checked against.
+func unreleasedHeader(base *semver.Version) string {
+	today := time.Now().Format("2006-01-02")
+	tag := viper.GetString("tag")
+
+	switch {
+	case viper.GetBool("inc-major"):
+		return fmt.Sprintf("## [%s] - %s", base.IncMajor(), today)
+	case viper.GetBool("inc-minor"):
+		return fmt.Sprintf("## [%s] - %s", base.IncMinor(), today)
+	case viper.GetBool("inc-patch"):
+		return fmt.Sprintf("## [%s] - %s", base.IncPatch(), today)
+	case tag != defaultUnreleasedTag:
+		ver, err := semver.NewVersion(tag)
+		if err != nil {
+			log.WithField("tag", tag).Fatal(err)
+		}
+		if ver.LessThan(base) {
+			log.Warnf("Unreleased tag %q is lower than existing tag %q in the repository.", ver, base)
+		}
+		if ver.Equal(base) {
+			log.Warnf("Unreleased tag %q already exists in the repository.", ver)
+		}
+		return fmt.Sprintf("## [%s] - %s", ver, today)
+	default:
+		return fmt.Sprintf("## [%s]", tag)
+	}
 }
 
 func getChangeLog() {
@@ -82,12 +139,9 @@ func getChangeLog() {
 		return
 	}
 
-	sort.Sort(semverTags)
+	slices.SortFunc(semverTags, (*semver.Version).Compare)
 
 	var prevTag *plumbing.Reference
-
-	// keep track of already processed commits to avoid re-traversing them
-	seen := make(map[plumbing.Hash]bool)
 
 	var changelog []string
 
@@ -100,33 +154,36 @@ func getChangeLog() {
 	if err != nil {
 		log.Fatalln("Cannot fetch HEAD commit:", err)
 	}
-	
+
 	// Filter tags to only include those that are ancestors of HEAD
 	// This ensures we don't include tags from other branches when generating
 	// a changelog from a specific branch (e.g., v0.10 branch shouldn't include
 	// tags from v25.x branch)
 	var ancestorTags semver.Collection
 	ancestorTagMap := make(map[string]*plumbing.Reference)
-	
+
+	// Walk back from HEAD once. Testing each tag separately would re-walk history
+	// from HEAD per tag, which is quadratic in repositories with many tags.
+	headReachable := make(map[plumbing.Hash]bool)
+	err = object.NewCommitIterBSF(headCommit, nil, nil).ForEach(func(c *object.Commit) error {
+		headReachable[c.Hash] = true
+		return nil
+	})
+	if err != nil {
+		log.Fatalln("Cannot walk history from HEAD:", err)
+	}
+
 	for _, ver := range semverTags {
 		tag := tagMap[ver.String()]
-		tagCommit := getTagCommit(repo, tag)
-		
-		// Check if this tag is an ancestor of HEAD
-		isAncestor, err := isAncestorCommit(repo, tagCommit, headCommit)
-		if err != nil {
-			log.Warnf("Error checking ancestry for tag %s: %v", ver.String(), err)
-			continue
-		}
-		if isAncestor {
+		if headReachable[getTagCommit(repo, tag).Hash] {
 			ancestorTags = append(ancestorTags, ver)
 			ancestorTagMap[ver.String()] = tag
 		}
 	}
-	
+
 	// Re-sort the filtered tags
-	sort.Sort(ancestorTags)
-	
+	slices.SortFunc(ancestorTags, (*semver.Version).Compare)
+
 	var lastAncestorTag *plumbing.Reference
 	var lastAncestorVer *semver.Version
 	if len(ancestorTags) > 0 {
@@ -136,34 +193,9 @@ func getChangeLog() {
 
 	// If --unreleased flag is set, only generate unreleased changes
 	if viper.GetBool("unreleased") && lastAncestorTag != nil {
-		unreleasedSeen := make(map[plumbing.Hash]bool)
-		entry := getTagEntryDetails(repo, lastAncestorTag, nil, unreleasedSeen)
+		entry := getTagEntryDetails(repo, lastAncestorTag, nil)
 		if entry != "" {
-			unreleasedTag := viper.GetString("tag")
-			unreleasedHeader := fmt.Sprintf("## [%s]", unreleasedTag)
-			if viper.GetBool("inc-major") {
-				unreleasedVer := lastAncestorVer.IncMajor()
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
-			} else if viper.GetBool("inc-minor") {
-				unreleasedVer := lastAncestorVer.IncMinor()
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
-			} else if viper.GetBool("inc-patch") {
-				unreleasedVer := lastAncestorVer.IncPatch()
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
-			} else if unreleasedTag != defaultUnreleasedTag {
-				unreleasedVer, err := semver.NewVersion(unreleasedTag)
-				if err != nil {
-					log.WithField("tag", unreleasedTag).Fatal(err)
-				}
-				if unreleasedVer.LessThan(lastAncestorVer) {
-					log.Warnf("Unreleased tag %q is lower than existing tag %q in the repository.", unreleasedVer, lastAncestorVer)
-				}
-				if unreleasedVer.Equal(lastAncestorVer) {
-					log.Warnf("Unreleased tag %q already exists in the repository.", unreleasedVer)
-				}
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", unreleasedVer, time.Now().Format("2006-01-02"))
-			}
-			changelog = []string{"# Changelog\n", unreleasedHeader, entry}
+			changelog = []string{"# Changelog\n", unreleasedHeader(lastAncestorVer), entry}
 		} else {
 			changelog = []string{"# Changelog\n"}
 		}
@@ -172,44 +204,16 @@ func getChangeLog() {
 		for _, ver := range ancestorTags {
 			tag := ancestorTagMap[ver.String()]
 			entry := fmt.Sprintf("## [%s] - %s\n", ver.String(), getTagCommit(repo, tag).Author.When.Format("2006-01-02"))
-			entry += getTagEntryDetails(repo, prevTag, tag, seen)
+			entry += getTagEntryDetails(repo, prevTag, tag)
 			changelog = append([]string{entry}, changelog...)
 			prevTag = tag
 			if lastAncestorTag != nil && ver == lastAncestorVer {
-				// For unreleased changes, use a fresh seen map to avoid excluding
-				// commits that were processed in other branches/tags
-				unreleasedSeen := make(map[plumbing.Hash]bool)
-				entry = getTagEntryDetails(repo, tag, nil, unreleasedSeen)
-				unreleasedTag := viper.GetString("tag")
-			unreleasedHeader := fmt.Sprintf("## [%s]", unreleasedTag)
-			if viper.GetBool("inc-major") {
-				unreleasedVer := ver.IncMajor()
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
-			} else if viper.GetBool("inc-minor") {
-				unreleasedVer := ver.IncMinor()
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
-			} else if viper.GetBool("inc-patch") {
-				unreleasedVer := ver.IncPatch()
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", &unreleasedVer, time.Now().Format("2006-01-02"))
-			} else if unreleasedTag != defaultUnreleasedTag {
-				unreleasedVer, err := semver.NewVersion(unreleasedTag)
-				if err != nil {
-					log.WithField("tag", unreleasedTag).Fatal(err)
+				entry = getTagEntryDetails(repo, tag, nil)
+				if entry != "" {
+					changelog = append([]string{unreleasedHeader(ver), entry}, changelog...)
 				}
-				if unreleasedVer.LessThan(ver) {
-					log.Warnf("Unreleased tag %q is lower than existing tag %q in the repository.", unreleasedVer, ver)
-				}
-				if unreleasedVer.Equal(ver) {
-					log.Warnf("Unreleased tag %q already exists in the repository.", unreleasedVer)
-				}
-				unreleasedHeader = fmt.Sprintf("## [%s] - %s", unreleasedVer, time.Now().Format("2006-01-02"))
-			}
-			unreleasedEntry := []string{unreleasedHeader, entry}
-			if entry != "" {
-				changelog = append(unreleasedEntry, changelog...)
 			}
 		}
-	}
 		changelog = append([]string{"# Changelog\n"}, changelog...)
 	}
 	if viper.GetString("output") != "" {
@@ -232,18 +236,11 @@ func getChangeLog() {
 	// Detect terminal width
 	var width uint
 	if isTerminal {
-		w, _, err := term.GetSize(int(os.Stdout.Fd()))
-		if err == nil {
-			width = uint(w)
-		}
-
-		if width > 120 {
-			width = 120
+		if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+			width = min(uint(w), 120)
 		}
 	}
-	if width == 0 {
-		width = 80
-	}
+	width = cmp.Or(width, 80)
 
 	// initialize glamour
 	var gs glamour.TermRendererOption
@@ -301,13 +298,14 @@ func getCommitsInRange(repo *git.Repository, olderTag, newerTag *plumbing.Refere
 		}
 	}
 
-	// Get commits reachable from until that are not in olderCommits
+	// Get commits reachable from until that are not in olderCommits. Passing
+	// olderCommits as seen prunes the walk at the tag boundary instead of
+	// traversing to the root and filtering; olderCommits is closed under
+	// ancestry, so nothing reachable only through it is lost.
 	var commits []*object.Commit
-	untilIter := object.NewCommitIterBSF(until, nil, nil)
+	untilIter := object.NewCommitIterBSF(until, olderCommits, nil)
 	err = untilIter.ForEach(func(c *object.Commit) error {
-		if !olderCommits[c.Hash] {
-			commits = append(commits, c)
-		}
+		commits = append(commits, c)
 		return nil
 	})
 	if err != nil {
@@ -317,28 +315,27 @@ func getCommitsInRange(repo *git.Repository, olderTag, newerTag *plumbing.Refere
 	return commits, nil
 }
 
-func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference, _ map[plumbing.Hash]bool) string {
+func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference) string {
 	// Get commits that are in this specific tag range
 	commits, err := getCommitsInRange(repo, olderTag, newerTag)
 	if err != nil {
 		log.Fatalln("Cannot get commits in range:", err)
 	}
 
-	var entry string
+	var entry strings.Builder
 
 	groupedCommits := make(map[string][]string)
 	var breakingChanges []string
 
 	for _, c := range commits {
 		// Only print the first line of the commit message (the title)
-		title := strings.Split(c.Message, "\n")[0]
+		title, _, _ := strings.Cut(c.Message, "\n")
 		isBreaking := strings.Contains(title, "!:") ||
 			strings.Contains(strings.ToLower(c.Message), "breaking change:") ||
 			strings.Contains(strings.ToLower(c.Message), "breaking-change:")
 
 		for _, group := range commitGroups {
-			re := regexp.MustCompile(group.Message + "(\\(.*\\))?!?:.")
-			matches := re.FindStringSubmatch(title)
+			matches := group.re.FindStringSubmatch(title)
 
 			if len(matches) > 0 {
 				if group.Skip {
@@ -353,9 +350,15 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 				}
 
 				// Remove prefix from the title
-				cleanTitle := re.ReplaceAllString(title, "")
+				cleanTitle := group.re.ReplaceAllString(title, "")
 				words := strings.Fields(cleanTitle)
-				words[0] = cases.Title(language.Und, cases.NoLower).String(words[0])
+				// The prefix match consumes one character past the colon, so a
+				// title that is only a prefix ("fix: ") leaves no words behind.
+				if len(words) == 0 {
+					log.Debugf("Skipping commit %s: no description after %q prefix", c.Hash.String()[:7], group.Message)
+					break
+				}
+				words[0] = titleCaser.String(words[0])
 				commitMsg := strings.TrimSpace(strings.Join(append([]string{scope}, words...), " "))
 				if isBreaking {
 					breakingChanges = append(breakingChanges, commitMsg)
@@ -368,22 +371,22 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 	}
 
 	if len(breakingChanges) > 0 {
-		entry += "\n### \U0001F4A5 Breaking Changes\n\n"
+		entry.WriteString("\n### \U0001F4A5 Breaking Changes\n\n")
 		for _, commit := range breakingChanges {
-			entry += fmt.Sprintln("- " + commit)
+			fmt.Fprintln(&entry, "- "+commit)
 		}
 	}
 
 	for _, groupName := range commitGroups {
 		commits := groupedCommits[groupName.Group]
 		if len(commits) > 0 {
-			entry += fmt.Sprintf("\n### %s\n\n", groupName.Group)
+			fmt.Fprintf(&entry, "\n### %s\n\n", groupName.Group)
 			for _, commit := range commits {
-				entry += fmt.Sprintln("- " + commit)
+				fmt.Fprintln(&entry, "- "+commit)
 			}
 		}
 	}
-	return entry
+	return entry.String()
 }
 
 func getTagCommit(repo *git.Repository, tag *plumbing.Reference) *object.Commit {
@@ -409,28 +412,4 @@ func getTagCommit(repo *git.Repository, tag *plumbing.Reference) *object.Commit 
 	}
 
 	return commit
-}
-
-// isAncestorCommit checks if ancestor is an ancestor of descendant
-func isAncestorCommit(_ *git.Repository, ancestor, descendant *object.Commit) (bool, error) {
-	// If they're the same commit, ancestor is technically an ancestor
-	if ancestor.Hash == descendant.Hash {
-		return true, nil
-	}
-	
-	// Walk back from descendant to see if we can reach ancestor
-	found := false
-	iter := object.NewCommitIterBSF(descendant, nil, nil)
-	err := iter.ForEach(func(c *object.Commit) error {
-		if c.Hash == ancestor.Hash {
-			found = true
-			return storer.ErrStop
-		}
-		return nil
-	})
-	if err != nil && err != storer.ErrStop {
-		return false, err
-	}
-	
-	return found, nil
 }
