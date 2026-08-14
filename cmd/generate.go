@@ -12,7 +12,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/charmbracelet/glamour"
-	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	log "github.com/sirupsen/logrus"
@@ -111,11 +110,12 @@ func getChangeLog() {
 	}
 	repoPath = filepath.Clean(repoPath)
 	log.Debugf("Repository path is set to %q", repoPath)
-	repo, err := git.PlainOpen(repoPath)
+	repo, closeRepo, err := openRepository(repoPath)
 	if err != nil {
 		log.Fatalln("Cannot open repository:", err)
 		return
 	}
+	defer closeRepo()
 
 	tags, err := repo.Tags()
 	if err != nil {
@@ -150,10 +150,6 @@ func getChangeLog() {
 	if err != nil {
 		log.Fatalln("Cannot resolve HEAD:", err)
 	}
-	headCommit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		log.Fatalln("Cannot fetch HEAD commit:", err)
-	}
 
 	// Filter tags to only include those that are ancestors of HEAD
 	// This ensures we don't include tags from other branches when generating
@@ -162,20 +158,18 @@ func getChangeLog() {
 	var ancestorTags semver.Collection
 	ancestorTagMap := make(map[string]*plumbing.Reference)
 
+	graph := newCommitGraph(repo)
+
 	// Walk back from HEAD once. Testing each tag separately would re-walk history
 	// from HEAD per tag, which is quadratic in repositories with many tags.
-	headReachable := make(map[plumbing.Hash]bool)
-	err = object.NewCommitIterBSF(headCommit, nil, nil).ForEach(func(c *object.Commit) error {
-		headReachable[c.Hash] = true
-		return nil
-	})
+	headReachable, err := graph.ancestors(head.Hash())
 	if err != nil {
 		log.Fatalln("Cannot walk history from HEAD:", err)
 	}
 
 	for _, ver := range semverTags {
 		tag := tagMap[ver.String()]
-		if headReachable[getTagCommit(repo, tag).Hash] {
+		if headReachable[graph.tagCommit(tag).Hash] {
 			ancestorTags = append(ancestorTags, ver)
 			ancestorTagMap[ver.String()] = tag
 		}
@@ -193,7 +187,7 @@ func getChangeLog() {
 
 	// If --unreleased flag is set, only generate unreleased changes
 	if viper.GetBool("unreleased") && lastAncestorTag != nil {
-		entry := getTagEntryDetails(repo, lastAncestorTag, nil)
+		entry := getTagEntryDetails(graph, lastAncestorTag, nil)
 		if entry != "" {
 			changelog = []string{"# Changelog\n", unreleasedHeader(lastAncestorVer), entry}
 		} else {
@@ -203,12 +197,12 @@ func getChangeLog() {
 		// Regular changelog generation
 		for _, ver := range ancestorTags {
 			tag := ancestorTagMap[ver.String()]
-			entry := fmt.Sprintf("## [%s] - %s\n", ver.String(), getTagCommit(repo, tag).Author.When.Format("2006-01-02"))
-			entry += getTagEntryDetails(repo, prevTag, tag)
+			entry := fmt.Sprintf("## [%s] - %s\n", ver.String(), graph.tagCommit(tag).Author.When.Format("2006-01-02"))
+			entry += getTagEntryDetails(graph, prevTag, tag)
 			changelog = append([]string{entry}, changelog...)
 			prevTag = tag
 			if lastAncestorTag != nil && ver == lastAncestorVer {
-				entry = getTagEntryDetails(repo, tag, nil)
+				entry = getTagEntryDetails(graph, tag, nil)
 				if entry != "" {
 					changelog = append([]string{unreleasedHeader(ver), entry}, changelog...)
 				}
@@ -266,34 +260,24 @@ func getChangeLog() {
 }
 
 // getCommitsInRange returns commits that are reachable from newerTag but not from olderTag
-func getCommitsInRange(repo *git.Repository, olderTag, newerTag *plumbing.Reference) ([]*object.Commit, error) {
-	var until *object.Commit
-	var err error
+func getCommitsInRange(g *commitGraph, olderTag, newerTag *plumbing.Reference) ([]*object.Commit, error) {
+	var until plumbing.Hash
 
 	if newerTag != nil {
-		until = getTagCommit(repo, newerTag)
+		until = g.tagCommit(newerTag).Hash
 	} else {
-		head, err := repo.Head()
+		head, err := g.repo.Head()
 		if err != nil {
 			return nil, err
 		}
-		until, err = repo.CommitObject(head.Hash())
-		if err != nil {
-			return nil, err
-		}
+		until = head.Hash()
 	}
 
 	// Get all commits reachable from olderTag (if any)
-	olderCommits := make(map[plumbing.Hash]bool)
+	var olderCommits map[plumbing.Hash]bool
 	if olderTag != nil {
-		olderCommit := getTagCommit(repo, olderTag)
-		olderCommits[olderCommit.Hash] = true
-		olderIter := object.NewCommitIterBSF(olderCommit, nil, nil)
-		err = olderIter.ForEach(func(c *object.Commit) error {
-			olderCommits[c.Hash] = true
-			return nil
-		})
-		if err != nil {
+		var err error
+		if olderCommits, err = g.ancestors(g.tagCommit(olderTag).Hash); err != nil {
 			return nil, err
 		}
 	}
@@ -303,8 +287,11 @@ func getCommitsInRange(repo *git.Repository, olderTag, newerTag *plumbing.Refere
 	// traversing to the root and filtering; olderCommits is closed under
 	// ancestry, so nothing reachable only through it is lost.
 	var commits []*object.Commit
-	untilIter := object.NewCommitIterBSF(until, olderCommits, nil)
-	err = untilIter.ForEach(func(c *object.Commit) error {
+	_, err := g.walk(until, olderCommits, 0, func(h plumbing.Hash) error {
+		c, err := g.repo.CommitObject(h)
+		if err != nil {
+			return err
+		}
 		commits = append(commits, c)
 		return nil
 	})
@@ -315,9 +302,9 @@ func getCommitsInRange(repo *git.Repository, olderTag, newerTag *plumbing.Refere
 	return commits, nil
 }
 
-func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Reference) string {
+func getTagEntryDetails(g *commitGraph, olderTag, newerTag *plumbing.Reference) string {
 	// Get commits that are in this specific tag range
-	commits, err := getCommitsInRange(repo, olderTag, newerTag)
+	commits, err := getCommitsInRange(g, olderTag, newerTag)
 	if err != nil {
 		log.Fatalln("Cannot get commits in range:", err)
 	}
@@ -387,29 +374,4 @@ func getTagEntryDetails(repo *git.Repository, olderTag, newerTag *plumbing.Refer
 		}
 	}
 	return entry.String()
-}
-
-func getTagCommit(repo *git.Repository, tag *plumbing.Reference) *object.Commit {
-	var commit *object.Commit
-	// Step 1: Resolve the Tag to a Commit
-	// Dereference the tag to get the commit it is pointing to
-	obj, err := repo.TagObject(tag.Hash())
-	if err != nil {
-		// The tag might be a lightweight tag,
-		// not an annotated tag. In this case,
-		// it directly points to a commit.
-		commit, err = repo.CommitObject(tag.Hash())
-		if err != nil {
-			log.Fatalln("Cannot retrieve commit from tag:", err)
-		}
-	} else {
-		// The tag is an annotated tag, so we need to
-		// further resolve the object it is pointing to.
-		commit, err = obj.Commit()
-		if err != nil {
-			log.Fatalln("Cannot retrieve commit from tag object:", err)
-		}
-	}
-
-	return commit
 }
